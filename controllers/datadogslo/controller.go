@@ -7,6 +7,7 @@ package datadogslo
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"time"
 
@@ -154,7 +155,7 @@ func (r *Reconciler) internalReconcile(ctx context.Context, req reconcile.Reques
 		if result, err = r.checkRequiredTags(logger, instance); err != nil || result.Requeue {
 			return r.updateStatusIfNeeded(logger, instance, status, result)
 		}
-		err = r.create(logger, instance, status, now, instanceSpecHash)
+		err = r.getOrCreate(logger, instance, status, now, instanceSpecHash)
 		if err != nil {
 			result.RequeueAfter = defaultErrRequeuePeriod
 		}
@@ -245,30 +246,48 @@ func (r *Reconciler) updateStatusIfNeeded(logger logr.Logger, instance *v1alpha1
 	return result, nil
 }
 
-func (r *Reconciler) create(logger logr.Logger, instance *v1alpha1.DatadogSLO, status *v1alpha1.DatadogSLOStatus, now metav1.Time, hash string) error {
+func (r *Reconciler) getOrCreate(logger logr.Logger, instance *v1alpha1.DatadogSLO, status *v1alpha1.DatadogSLOStatus, now metav1.Time, hash string) error {
 	logger.V(1).Info("SLO ID is not set; creating SLO in Datadog")
 
-	// Create SLO in Datadog
-	createdSLO, err := createSLO(r.datadogAuth, r.datadogClient, instance)
+	slos, err := searchSLO(r.datadogAuth, r.datadogClient, instance.Spec.Name)
 	if err != nil {
-		logger.Error(err, "error creating SLO")
-		updateErrStatus(status, now, v1alpha1.DatadogSLOSyncStatusCreateError, "CreatingSLO", err)
+		logger.Error(err, "error searching SLO")
 		return err
 	}
 
-	// Set condition and status
-	condition.UpdateStatusConditions(&status.Conditions, now, condition.DatadogConditionTypeCreated, metav1.ConditionTrue, "CreatingSLO", "DatadogSLO Created")
-	creator := createdSLO.GetCreator()
-	createdTime := metav1.Unix(createdSLO.GetCreatedAt(), 0)
+	//Log error if more than one SLO is found
+	switch len(slos.Attributes.Slos) {
+	case 0:
+		// Create SLO in Datadog
+		slo, err := createSLO(r.datadogAuth, r.datadogClient, instance)
+		if err != nil {
+			logger.Error(err, "error creating SLO")
+			updateErrStatus(status, now, v1alpha1.DatadogSLOSyncStatusCreateError, "CreatingSLO", err)
+			return err
+		}
+		createdTime := metav1.Unix(slo.GetCreatedAt(), 0)
+		creator := slo.GetCreator()
+		status.ID = slo.GetId()
+		status.Creator = creator.GetEmail()
+		status.Created = &createdTime
+		status.CurrentHash = hash
 
-	status.SyncStatus = v1alpha1.DatadogSLOSyncStatusOK
-	status.ID = createdSLO.GetId()
-	status.Creator = creator.GetEmail()
-	status.Created = &createdTime
-	status.CurrentHash = hash
+		// Set condition and status
+		condition.UpdateStatusConditions(&status.Conditions, now, condition.DatadogConditionTypeCreated, metav1.ConditionTrue, "CreatingSLO", "DatadogSLO Created")
 
-	logger.Info("Created a new DatadogSLO", "SLO ID", instance.Status.ID)
-	r.recordEvent(instance, buildEventInfo(instance.Name, instance.Namespace, datadog.CreationEvent))
+		logger.Info("Created a new DatadogSLO", "SLO ID", instance.Status.ID)
+		r.recordEvent(instance, buildEventInfo(instance.Name, instance.Namespace, datadog.CreationEvent))
+	case 1:
+		slo := slos.Attributes.Slos[0].Data
+		createdTime := metav1.Unix(*slo.Attributes.CreatedAt, 0)
+		status.ID = slo.GetId()
+		status.Creator = *slo.Attributes.GetCreator().Email
+		status.Created = &createdTime
+		status.CurrentHash = hash
+	default:
+		logger.Error(err, "more than one SLO found")
+		return errors.New("more than one SLO found")
+	}
 
 	return nil
 }
