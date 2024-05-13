@@ -104,6 +104,15 @@ func getSLO(auth context.Context, client *datadogV1.ServiceLevelObjectivesApi, s
 	return slo.Data, nil
 }
 
+func searchSLO(auth context.Context, client *datadogV1.ServiceLevelObjectivesApi, query string) (*datadogV1.SearchSLOResponseData, error) {
+	slo, _, err := client.SearchSLO(auth, datadogV1.SearchSLOOptionalParameters{Query: &query})
+	if err != nil {
+		return &datadogV1.SearchSLOResponseData{}, translateClientError(err, "error getting SLO")
+	}
+
+	return slo.Data, nil
+}
+
 func updateSLO(auth context.Context, client *datadogV1.ServiceLevelObjectivesApi, crdSLO *v1alpha1.DatadogSLO) (datadogV1.SLOListResponse, error) {
 	_, slo := buildSLO(crdSLO)
 	sloListResponse, _, err := client.UpdateSLO(auth, crdSLO.Status.ID, *slo)
